@@ -1,32 +1,55 @@
-import crypto from "crypto";
 import { cookies } from "next/headers";
+import { createHmac, timingSafeEqual } from "crypto";
 
-const COOKIE = "bc_admin_session";
+export const sessionCookieName = "bc_store_session";
+
+const SESSION_MAX_AGE = 60 * 60 * 24 * 7;
+
+function getSecret() {
+  return process.env.ADMIN_SESSION_SECRET || process.env.ADMIN_PASSWORD || "";
+}
 
 function sign(value: string) {
-  return crypto.createHmac("sha256", process.env.SESSION_SECRET || "change-me").update(value).digest("hex");
+  return createHmac("sha256", getSecret()).update(value).digest("hex");
 }
 
 export function createSession(email: string) {
-  const payload = Buffer.from(JSON.stringify({ email, exp: Date.now() + 1000 * 60 * 60 * 24 * 7 })).toString("base64url");
-  return `${payload}.${sign(payload)}`;
+  const timestamp = Date.now().toString();
+  const data = `${email}|${timestamp}`;
+  const signature = sign(data);
+
+  return Buffer.from(`${data}|${signature}`).toString("base64url");
 }
 
-export function validSession(token?: string) {
-  if (!token) return false;
-  const [payload, signature] = token.split(".");
-  if (!payload || !signature || !crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(sign(payload)))) return false;
+export async function isAdmin() {
+  const cookieStore = await cookies();
+  const token = cookieStore.get(sessionCookieName)?.value;
+
+  if (!token || !getSecret()) return false;
+
   try {
-    const data = JSON.parse(Buffer.from(payload, "base64url").toString());
-    return data.exp > Date.now() && data.email === process.env.ADMIN_EMAIL;
+    const decoded = Buffer.from(token, "base64url").toString("utf8");
+    const parts = decoded.split("|");
+
+    if (parts.length !== 3) return false;
+
+    const [email, timestamp, signature] = parts;
+
+    if (email !== process.env.ADMIN_EMAIL) return false;
+
+    const age = Date.now() - Number(timestamp);
+
+    if (!Number.isFinite(age) || age < 0 || age > SESSION_MAX_AGE * 1000) {
+      return false;
+    }
+
+    const expectedSignature = sign(`${email}|${timestamp}`);
+
+    return timingSafeEqual(
+      Buffer.from(signature),
+      Buffer.from(expectedSignature)
+    );
   } catch {
     return false;
   }
 }
-
-export async function isAdmin() {
-  const store = await cookies();
-  return validSession(store.get(COOKIE)?.value);
-}
-
-export const sessionCookieName = COOKIE;
